@@ -33,8 +33,8 @@ cuda_assert(const cudaError_t code, const char* const file, const int line, cons
 #define CUB_SORT_TYPE   uint64_t
 #endif
 
-#define CUB_SORT_WARMUP 100
-#define CUB_SORT_BENCH  100
+#define CUB_SORT_WARMUP 10
+#define CUB_SORT_BENCH  10
 
 //
 //

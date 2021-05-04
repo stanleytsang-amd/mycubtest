@@ -1,16 +1,6 @@
 #!/bin/bash
 #input='test.input'
-input='iter2-25-cub.size.sort.uniq'
-
-if [ -z "$1" ]
-then 
-    echo "Please specify the 'rocm' or 'cuda'."
-    exit
-fi
-
-rm $1.csv
-
-IFS=$'\n' read -d '' -r -a lines < ${input}
+input='iter2-25-cub.size.sort'
 
 progressbar()
 {
@@ -20,28 +10,46 @@ progressbar()
     printf "\r[%-${barlength}s (%d%%)] " "${bar:0:n}" "$[$1*100/$total]" 
 }
 
-#i=1
-#total=${#lines[@]}
-#sleep 1
-#echo 'Total # of testcases': $total
-#for line in "${lines[@]}"
-#do
-#    #echo $line
-#    ./sort_float_rocm.exe 0 $line $line 1024 >> rocm.csv
-#    progressbar $i $total
-#    i=$(($i+1))
-#done
-#echo '\n'
-#sleep 1
+if [ -z "$1" ]
+then 
+    echo "Please specify the 'rocm' or 'cuda'."
+    exit
+fi
+if [ -z "$2" ]
+then 
+    echo "Please specify the 'output file name'."
+    exit
+fi
 
+rm $2.csv
 
-total=${#lines[@]}
-for i in $(seq 1 $[total/100] ${total});
-do
-#echo $i
-    ./sort_float_$1.exe 0 ${lines[$i]} ${lines[$i]} 1024 >> $1.csv
-    progressbar $i $total
-#    i=$(($i+100))
-done
-echo '\n'
+if [ -z "$3" ]
+then
+    echo "Pickup every #1%th record"
+    uniq $input > $input.uniq
+    IFS=$'\n' read -d '' -r -a lines < ${input}.uniq
+    total=${#lines[@]}
+    for i in $(seq 1 $[total/100] ${total});
+    do
+        ./sort_float_$1.exe 0 ${lines[$i]} ${lines[$i]} 1024 >> $2.csv
+        progressbar $i $total
+    done
+else
+    echo "Pickup Top $3 records"
+    uniq -c $input > $input.uniq.count
+    sort -r -k 1 -n $input.uniq.count > $input.uniq.count.sort
+    IFS=$'\n' read -d '' -r -a lines < ${input}.uniq.count.sort
+    total=$3
+    for i in $(seq 1 ${total});
+    do
+        IFS=', ' read -r -a data <<< "${lines[$i]}"
+        ./sort_float_$1.exe 0 ${data[1]} ${data[1]} 1024 >> $2.csv
+        progressbar $i $total
+    done
+fi
 sleep 1
+
+
+
+
+
