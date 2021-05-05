@@ -1,36 +1,37 @@
+#include "float.h"
 #include <curand.h>
 #include <cub/cub.cuh>
-
+#include <time.h>
+#include <fstream>
+#include <string>
 //
 //
 //
 
 #include <stdbool.h>
 
-static
-void
-cuda_assert(const cudaError_t code, const char* const file, const int line, const bool abort)
-{
-  if (code != cudaSuccess)
-    {
-      fprintf(stderr,"cuda_assert: %s %s %d\n",cudaGetErrorString(code),file,line);
+#define DEBUG_HANDLE_ERROR( err ) (HandleError( err, __FILE__, __LINE__ ))
 
-      if (abort)
-        {
-          cudaDeviceReset();
-          exit(code);
-        }
+static void HandleError( cudaError_t err, const char *file, int line )
+{
+
+    if (err != cudaSuccess)
+    {
+    	fprintf(stderr, "ERROR: %s in %s at line %d (error-code %d)\n",
+	cudaGetErrorString( err ), file, line, err );
+    	fflush(stdout);
+        exit(err);
     }
 }
 
-#define cuda(...) { cuda_assert((cuda##__VA_ARGS__), __FILE__, __LINE__, true); }
+
 
 //
 //
 //
 
 #ifndef CUB_SORT_TYPE
-#define CUB_SORT_TYPE   uint64_t
+#define CUB_SORT_TYPE   float
 #endif
 
 #define CUB_SORT_WARMUP 10
@@ -53,18 +54,24 @@ sort(uint32_t        count,
      float         * max_ms,
      float         * elapsed_ms)
 {
-  cuda(EventRecord(start,0));
+  DEBUG_HANDLE_ERROR(cudaEventRecord(start,0));
 
-  cub::DeviceRadixSort::SortKeys(tmp,tmp_size,vin_d,vout_d,count);
+  cub::DeviceRadixSort::SortKeys(tmp,tmp_size,vin_d,vout_d,count,0, sizeof(float)*8,0);
+  //hipcub::DeviceRadixSort::SortKeys(tmp,tmp_size,vin_d,vout_d,count);
 
-  cuda(EventRecord(end,0));
-  cuda(EventSynchronize(end));
+  DEBUG_HANDLE_ERROR(cudaEventRecord(end,0));
+  DEBUG_HANDLE_ERROR(cudaEventSynchronize(end));
 
   float t_ms;
-  cuda(EventElapsedTime(&t_ms,start,end));
+  DEBUG_HANDLE_ERROR(cudaEventElapsedTime(&t_ms,start,end));
 
-  *min_ms      = min(*min_ms,t_ms);
-  *max_ms      = max(*max_ms,t_ms);
+
+//  *min_ms      = (float)min(*min_ms,t_ms);
+  if (t_ms < *min_ms)
+    *min_ms = t_ms;
+//  *max_ms      = (float)max(*max_ms,t_ms);
+  if (t_ms > *max_ms)
+    *max_ms = t_ms;
   *elapsed_ms += t_ms;
 }
 
@@ -74,8 +81,10 @@ sort(uint32_t        count,
 
 static
 void
-bench(const struct cudaDeviceProp* const props, const uint32_t count)
+bench(FILE *fp, const cudaDeviceProp* const props, const uint32_t count)
 {
+  clock_t start, end;
+  double cpu_time_used;
   //
   // allocate
   //
@@ -83,25 +92,33 @@ bench(const struct cudaDeviceProp* const props, const uint32_t count)
   CUB_SORT_TYPE * vin_d;
   CUB_SORT_TYPE * vout_d;
 
-  cuda(Malloc(&vin_d, vin_size));
-  cuda(Malloc(&vout_d,vin_size));
+  start = clock();
+  DEBUG_HANDLE_ERROR(cudaMalloc(&vin_d, vin_size));
+  DEBUG_HANDLE_ERROR(cudaMalloc(&vout_d,vin_size));
+  end = clock();
+  cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+  //printf("Time 'allocate' = %f\n", cpu_time_used);
 
   //
   // fill with random values
   //
   curandGenerator_t prng;
 
+  start = clock();
   curandCreateGenerator(&prng,CURAND_RNG_PSEUDO_XORWOW);
 
   curandSetPseudoRandomGeneratorSeed(prng,0xCAFEBABE);
 
-  if      (sizeof(CUB_SORT_TYPE) == sizeof(unsigned int)) {
-    curandGenerate(prng,(unsigned int*)vin_d,count);
-  } else if (sizeof(CUB_SORT_TYPE) == sizeof(unsigned long long)) {
-    curandGenerateLongLong(prng,(unsigned long long*)vin_d,count);
-  } else {
-    exit(EXIT_FAILURE);
-  }
+//  if      (sizeof(CUB_SORT_TYPE) == sizeof(unsigned int)) {
+//    hiprandGenerate(prng,(unsigned int*)vin_d,count);
+//  } else if (sizeof(CUB_SORT_TYPE) == sizeof(unsigned long long)) {
+    curandGenerateUniform(prng,(float*)vin_d,count);
+//  } else {
+//    exit(EXIT_FAILURE);
+//  }
+  end = clock();
+  cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+  //printf("Time 'fill' = %f\n", cpu_time_used);
 
   //
   // size and allocate the temp array
@@ -110,44 +127,59 @@ bench(const struct cudaDeviceProp* const props, const uint32_t count)
   size_t tmp_size = 0;
 
   cub::DeviceRadixSort::SortKeys(NULL,tmp_size,vin_d,vout_d,count);
-  cuda(Malloc(&tmp,tmp_size));
+  if(tmp_size==0)
+      tmp_size=1;
+
+  DEBUG_HANDLE_ERROR(cudaMalloc((void**)&tmp,tmp_size));
 
   //
   // benchmark
   //
-  cudaEvent_t start, end;
-  cuda(EventCreate(&start));
-  cuda(EventCreate(&end));
+  cudaEvent_t _start, _end;
+  DEBUG_HANDLE_ERROR(cudaEventCreate(&_start));
+  DEBUG_HANDLE_ERROR(cudaEventCreate(&_end));
 
-  float min_ms     = FLT_MAX;
+  float min_ms     = 999;//FLT_MAX;
   float max_ms     = 0.0f;
   float elapsed_ms = 0.0f;
 
-  for (int ii=0; ii<CUB_SORT_WARMUP; ii++)
-    sort(count,vin_d,vout_d,tmp,tmp_size,start,end,
+  start = clock();
+  for (int ii=0; ii<CUB_SORT_WARMUP; ii++) {
+    sort(count,vin_d,vout_d,tmp,tmp_size,_start,_end,
          &min_ms,
          &max_ms,
          &elapsed_ms);
+  }
+  end = clock();
+  cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+  //printf("Time 'warmup' = %f\n", cpu_time_used);
 
-  min_ms     = FLT_MAX;
+  min_ms     = 999;//FLT_MAX;
   max_ms     = 0.0f;
   elapsed_ms = 0.0f;
 
-  for (int ii=0; ii<CUB_SORT_BENCH; ii++)
-    sort(count,vin_d,vout_d,tmp,tmp_size,start,end,
+  start = clock();
+  for (int ii=0; ii<CUB_SORT_BENCH; ii++) {
+    sort(count,vin_d,vout_d,tmp,tmp_size,_start,_end,
          &min_ms,
          &max_ms,
          &elapsed_ms);
+  }
+  end = clock();
+  cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+  //printf("Time 'benchmark' = %f\n", cpu_time_used);
 
-  cuda(EventDestroy(start));
-  cuda(EventDestroy(end));
+  DEBUG_HANDLE_ERROR(cudaEventDestroy(_start));
+  DEBUG_HANDLE_ERROR(cudaEventDestroy(_end));
 
   //
   //
   //
-  cuda(Free(tmp));
-  cuda(Free(vout_d));
-  cuda(Free(vin_d));
+  curandDestroyGenerator(prng);
+  DEBUG_HANDLE_ERROR(cudaFree(tmp));
+  DEBUG_HANDLE_ERROR(cudaFree(vout_d));
+  DEBUG_HANDLE_ERROR(cudaFree(vin_d));
+
 
   //
   //
@@ -155,7 +187,8 @@ bench(const struct cudaDeviceProp* const props, const uint32_t count)
 #define STRINGIFY2(s) #s
 #define STRINGIFY(s)  STRINGIFY2(s)
 
-  fprintf(stdout,"%s, %u, %s, %u, %u, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
+  start = clock();
+  fprintf(fp/*stdout*/,"%s, %u, %s, %u, %u, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
           props->name,
           props->multiProcessorCount,
           STRINGIFY(CUB_SORT_TYPE),
@@ -167,6 +200,19 @@ bench(const struct cudaDeviceProp* const props, const uint32_t count)
           (double)max_ms,
           (double)(CUB_SORT_BENCH * count) / (1000.0 * elapsed_ms),
           (double)count                    / (1000.0 * min_ms));
+  end = clock();
+  cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+  //printf("Time 'print' = %f\n", cpu_time_used);
+
+//  fstream outFile;
+//  outFile.open("rocm-0504.csv", ios::app);
+//
+//  // Write to the file
+//  outFile << ;
+//
+//  // Close file
+//  outFile.close();
+
 }
 
 //
@@ -176,14 +222,16 @@ bench(const struct cudaDeviceProp* const props, const uint32_t count)
 int
 main(int argc, char** argv)
 {
-  const int32_t device = (argc == 1) ? 0 : atoi(argv[1]);
+  const int32_t device = (argc == 1) ? 1 : atoi(argv[1]);
 
-  struct cudaDeviceProp props;
-  cuda(GetDeviceProperties(&props,device));
+  DEBUG_HANDLE_ERROR(cudaSetDevice(device));
+  cudaDeviceProp props;
+  DEBUG_HANDLE_ERROR(cudaGetDeviceProperties(&props,device));
 
-  printf("%s (%2d)\n",props.name,props.multiProcessorCount);
+  //printf("%s (%2d)\n",props.name,props.multiProcessorCount);
 
-  cuda(SetDevice(device));
+  FILE *fp;  
+  fp = fopen("cuda-0504-2.csv", "w");
 
   //
   //
@@ -195,7 +243,7 @@ main(int argc, char** argv)
   //
   // LABELS
   //
-  fprintf(stdout,
+  fprintf(fp/*stdout*/,
           "Device, "
           "Multiprocessors, "
           "Type, "
@@ -207,17 +255,27 @@ main(int argc, char** argv)
           "Max Msecs, "
           "Avg. Mkeys/s, "
           "Max. Mkeys/s\n");
-
   //
   // SORT
   //
-  for (uint32_t count=count_lo; count<=count_hi; count+=count_step)
-    bench(&props,count);
+
+  long long count = 0;
+  std::ifstream file("iter2-25-cub.size.sort.uniq.reverse");
+  //std::ifstream file("test.input");
+  std::string str;
+  while (std::getline(file, str)) {
+    if (count % 1000 == 0) {
+        std::cout << "COUNT: " << count << "\n";
+    }
+    count++;
+    bench(fp, &props, std::stoi(str));
+  }
+  fclose(fp);
 
   //
   // RESET
   //
-  cuda(DeviceReset());
+  DEBUG_HANDLE_ERROR(cudaDeviceReset());
 
   return 0;
 }
