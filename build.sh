@@ -10,6 +10,6 @@ if [ "$1" == "cuda" ]
 then
     nvcc -D CUB_SORT_TYPE=float -lcurand  -o sort_float_cuda.exe device_radix_sort.cu
 else
-    hipcc device_radix_sort.cpp -I/opt/rocm/include/hiprand/ -I/opt/rocm/include/rocrand/ -L/opt/rocm/lib/ -lhiprand -D CUB_SORT_TYPE=float -o sort_float_rocm.exe
+    hipcc device_radix_sort.cpp -I/opt/rocm/hiprand/include -I/opt/rocm/rocrand/include -L/opt/rocm/lib/ -L/opt/rocm/hiprand/lib -lhiprand -D CUB_SORT_TYPE=float -o sort_float_rocm.exe
 fi
 
